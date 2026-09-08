@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 import random 
 from functools import partial
 import select
+import xml.etree.ElementTree as ET
+import urllib.request
 
 def create_TCP_header( #takes only int values
         source_port,
@@ -236,7 +238,7 @@ def syn_scan(port, destination_ip, source_ip, quietness):
                 received_data = raw_tcp_socket.recv(65535)
                 tcp_recv = ip_header_remover(received_data)
 
-                isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=lst_syn_packet[1], destination_port=port, received_packet=received_data)
+                isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=lst_syn_packet[1], destination_port=port, received_packet=received_data, isTCP=True)
                 if isExpectedPacket:
                     break
 
@@ -651,7 +653,7 @@ def os_syn_scan(destination_ip, source_ip):
                 received_data = raw_tcp_socket_os.recv(65535)
                 tcp_recv = ip_header_remover(received_data)
 
-                isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=syn_packet[1], destination_port=port, received_packet=received_data)
+                isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=syn_packet[1], destination_port=port, received_packet=received_data, isTCP=True)
                 if isExpectedPacket:
                     portNotFiltered = True
                     break
@@ -861,6 +863,106 @@ def os_finterprinting(destination_ip, source_ip ):
         print("\n System Description: " + snmp_request_evaluation[0])
         print("\n System Object: " + snmp_request_evaluation[1])
 
+def xml_parser(xml_data, xml_type):
+        
+    results = []
+    
+    if xml_type == "ssdp":
+        root = ET.fromstring(xml_data)
+
+        device = root.find("{*}device")
+        try: 
+            results.append(device.find('{*}deviceType').text)
+        except:
+            results.append("N/A")
+
+        try: 
+            results.append(device.find('{*}friendlyName').text)
+        except:
+                    results.append("N/A")
+
+        try:
+            results.append(device.find('{*}manufacturer').text)
+        except:
+                    results.append("N/A")
+
+        try:
+            results.append(device.find('{*}modelName').text)
+        except:
+                    results.append("N/A")
+
+    return results
+
+def network_scan(source_ip): 
+
+    port = 1900
+    destination_ip = "239.255.255.250" 
+
+    message = (
+        "M-SEARCH * HTTP/1.1\r\n"
+        f"HOST: 239.255.255.250:1900\r\n"           #multicast channel
+        "MAN: \"ssdp:discover\"\r\n"             
+        "MX: 1\r\n"                              
+        "ST: ssdp:all\r\n"                          #all services would reply
+        "\r\n" 
+    ) 
+    udp_data = message.encode()
+
+    ssdp_packet_lst = create_UDP_packet(port=port, destination_ip=destination_ip, source_ip=source_ip, length=8+len(udp_data), data=udp_data)
+
+    raw_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)
+    raw_udp_socket.settimeout(5)
+
+    ssdp_replies = []
+
+    try: 
+
+        raw_udp_socket.sendto(ssdp_packet_lst[0], (destination_ip, port))
+        while True:
+            try: 
+            
+                received_data = raw_udp_socket.recv(65535)
+                udp_data = ip_header_remover(received_data)[8:]
+                ssdp_replies.append(udp_data) 
+
+
+            except socket.timeout:  #if it times out that means there is no more devices on the network 
+                break
+    finally:
+        raw_udp_socket.close()   
+
+    results = []
+
+    for reply in ssdp_replies: 
+        ssdp_response = reply.decode("utf-8",errors="replace")
+
+        location_index = ssdp_response.lower().find("location:")  
+        if location_index == -1: 
+            continue #there is no location on this xml
+
+        end_of_line = ssdp_response.find("\r\n", location_index)
+        location_line = ssdp_response[location_index:end_of_line]   #location: http...    
+        url = location_line.split(":", 1)[1].strip()                #starts at http...
+
+        try:
+            with urllib.request.urlopen(url) as raw_xml:
+                xml_data = raw_xml.read().decode()
+        except Exception:
+            continue
+
+        results.append(xml_parser(xml_data, "ssdp"))
+
+    if not results: 
+        print("No devices found on the network")
+    else: 
+        for i in range(len(results)):
+
+                print(f"| Device: {results[i][1]}")
+                print(f"Device Type: {results[i][0]} |")
+                print(f"Manufacturer: {results[i][2]} |")
+                print(f"Model Name: {results[i][3]} |")
+                print("\n")
+
 def devicescanning():
 
     print("Type only the number indicated by the alternative")
@@ -874,7 +976,7 @@ def devicescanning():
 
     elif scan_type == 5: 
 
-        network_scan()
+        network_scan(source_ip)
 
     else: 
         
@@ -916,6 +1018,4 @@ def devicescanning():
                 port_scan(type_of_scan = "syn", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, source_ip=source_ip)
 
     
-
-devicescanning()
-
+devicescanning() 
