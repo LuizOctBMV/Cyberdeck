@@ -6,6 +6,7 @@ from functools import partial
 import select
 import xml.etree.ElementTree as ET
 import urllib.request
+import csv
 
 def create_TCP_header( #takes only int values
         source_port,
@@ -120,7 +121,7 @@ def calculate_checksum(
     return ~low16bits & 0xFFFF                                      #doing ones complement and using a mask to restrict for 16 bits
 
     
-def get_source_ip(destination_ip):
+def get_source_ip(destination_ip="8.8.8.8"): #using Google DNS to get the source IP address of the machine
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect((destination_ip, 80))
@@ -131,32 +132,30 @@ def get_source_ip(destination_ip):
 def evaluate_flags(protocol, flag): 
 
     if protocol == "tcp":
-        if (flag & 0x12) == 0x12:
+        if (flag & 0x12) == 0x12:       #syn+ack flag
             return "Open"
-        elif (flag & 0x04) == 0x04: 
+        elif (flag & 0x04) == 0x04:     #rst flag
             return "Closed"
         
     elif protocol == "icmp":
-        if (flag & 0x03) == 0x03: 
+        if (flag & 0x03) == 0x03:   #destination unreachable
             return "Closed"
         else: 
             return "Filtered"
 
 def ip_header_remover(packet):
-    '''
 
+    '''
     this method removes the IP header from the received packet so the 
     desired header can be processed
-    e.g. a TCP packet was received and it is necessary to analyze it, 
-    therefore first it is important to separate the IP header from the TCP header
-    
     '''
+
     first_byte = packet[0]           # first byte contains version and IP packet length
     ihl = first_byte & 0x0F          # takes the version out
     ip_header_size = ihl * 4 
     return packet[ip_header_size:]   #returns the desired header
 
-def packet_validation(destination_ip, source_port, destination_port, received_packet, isTCP=False, isUDP=False, containsICMP=False): 
+def packet_validation(received_packet,destination_ip=0, source_port=0, destination_port=0, isTCP=False, isUDP=False, containsICMP=False): 
     
     '''
     method to check if the received packet is the expected response packet, since the 
@@ -170,11 +169,11 @@ def packet_validation(destination_ip, source_port, destination_port, received_pa
     sender_destination_port = 0
 
     if isUDP:
-        if (not containsICMP): #no ICMP header
+        if (not containsICMP): 
             udp_recv = ip_header_remover(received_packet)
                 
         elif containsICMP: 
-            icmp_recv = ip_header_remover(received_packet)      # removes the sender IP header
+            icmp_recv = ip_header_remover(received_packet)      
             udp_recv = ip_header_remover(icmp_recv[8:])         # removes everything except the original UDP header
 
 
@@ -189,7 +188,7 @@ def packet_validation(destination_ip, source_port, destination_port, received_pa
         sender_src_ip = socket.inet_ntoa(received_packet[12:16])                        
         sender_src_port = struct.unpack("!H", tcp_recv[0:2])[0]                         # getting the source port from the received tcp header
         sender_destination_port = struct.unpack("!H", tcp_recv[2:4])[0]                 # getting the destination port from the received tcp header
-        
+
     if (sender_src_ip == destination_ip) and (sender_src_port == destination_port) and (sender_destination_port == source_port):
         return True
     return False
@@ -222,6 +221,13 @@ def create_SYN_packet(port, destination_ip, source_ip):
     return [final_packet,src_port]
 
 def syn_scan(port, destination_ip, source_ip, quietness): 
+
+    '''
+    this method creates a SYN packet from scratch and sends it to the specified destination_ip and port;
+    after waiting for the response, it can be a timeout, which means the port is filtered, 
+    or a SYN+ACK packet, which means the port is open, or a RST packet, which means the port is closed
+    '''
+
     port_n_state = [port, "n/a"]
 
     lst_syn_packet = create_SYN_packet(port, destination_ip, source_ip)
@@ -253,6 +259,11 @@ def syn_scan(port, destination_ip, source_ip, quietness):
     return port_n_state
 
 def tcp_scan(port, destination_ip, quietness): 
+
+    '''
+    this method attempts a TCP connection using a TCP socket
+    if the connection is established, the port is open, if it is refused, the port is closed
+    '''
 
     port_n_state = [port, "n/a"]
 
@@ -290,7 +301,13 @@ def oid_bytes_creator(OID):
         oid_bytes += OID[i].to_bytes(1, 'big')
 
     return oid_bytes
-def snmp_port_scan(community_string, version=1, OID=[[1,3,6,1,2,1,1,1,0]]): 
+
+def snmp_data(community_string, version=1, OID=[[1,3,6,1,2,1,1,1,0]]): 
+
+    """ 
+    this methods creates the SNMP data (which is the payload of the UDP packet)
+    the data must be encapsulated in a TLV format (Type-Length-Value) 
+    """
 
     binding_total_vlv = 0
 
@@ -302,7 +319,7 @@ def snmp_port_scan(community_string, version=1, OID=[[1,3,6,1,2,1,1,1,0]]):
 
     else: 
         for j in len(OID): 
-
+            # OIDs are encapsulated on the same sequence box, therefore they need to be calculated together
             oid_bytes = oid_bytes_creator(OID)
 
             oid_tlv = tlv(0x06, oid_bytes)
@@ -330,7 +347,7 @@ def create_UDP_header(
     
 def create_UDP_packet(port, destination_ip, source_ip, length, data=b''): 
 
-    src_port = random.randint(5000, 62439)  
+    src_port = random.randint(5000, 62439)  #random port so it is not the same for every packet, which would be suspicious
 
     udp_header = create_UDP_header(source_port=src_port, destination_port=port, length=length, data=data)
     udp_pseudo_header = calculate_pseudo_header(source_ip=source_ip, destination_ip=destination_ip, protocol=17, protocol_length=length)
@@ -341,6 +358,13 @@ def create_UDP_packet(port, destination_ip, source_ip, length, data=b''):
 
 def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False, osFingerprinting = False): 
 
+    '''
+    creates a UDP packet from scratch and sends to the specified destination_ip
+    if it is a targeted scan, it will send to specific ports only, since UDP is highly reactive
+    to the payload sent with the header. The payload would be specific to the popular service that runs behind that port
+    the non targeted scan will send a general and non specific header to every port
+    '''
+
     port_n_state = [port, "n/a"]
 
     if isTargeted:
@@ -348,9 +372,9 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
         if port == 53: #DNS
             id = random.randint(0,65534)
             dns_header = struct.pack("!HHHHHH", 
-                id, 
-                256, 
-                1, 
+                id,     # ID
+                256,    #
+                1,      #
                 0, 
                 0, 
                 0
@@ -436,11 +460,11 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
 
         elif port == 1900: #SSDP
             message = (
-                "M-SEARCH * HTTP/1.1\r\n"
-                f"HOST: {destination_ip}:1900\r\n"       #unicast search to the target IP
-                "MAN: \"ssdp:discover\"\r\n"             
-                "MX: 1\r\n"                              
-                "ST: ssdp:all\r\n"                       #all services would reply
+                "M-SEARCH * HTTP/1.1\r\n"                # type of message = M-Search  
+                f"HOST: {destination_ip}:1900\r\n"       # unicast search to the target IP
+                "MAN: \"ssdp:discover\"\r\n"             # type of search
+                "MX: 1\r\n"                              # time to wait to reply 
+                "ST: ssdp:all\r\n"                       #service targeted = all
                 "\r\n" 
             ) 
             udp_data = message.encode()
@@ -449,6 +473,7 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
         lst_udp_packet = create_UDP_packet(port, destination_ip, source_ip, data=udp_data, length = 8 + len(udp_data))
 
     elif port == 161 and isTargeted: #SNMP 
+        
         wordlist = ["public", "private"] #todo > find a wordlist.txt to use instead of an array
         validWord = False
 
@@ -460,9 +485,9 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
 
                 if osFingerprinting: 
                     sentOID = [1,3,6,1,2,1,1,1,0], [1,3,6,1,2,1,1,2,0]
-                    udp_data = snmp_port_scan(word, OID=[sentOID])
+                    udp_data = snmp_data(word, OID=[sentOID])
                 else: 
-                    udp_data = snmp_port_scan(word)
+                    udp_data = snmp_data(word)
                     
                 lst_udp_packet_snmp = create_UDP_packet(port, destination_ip, source_ip, data=udp_data, length = 8 + len(udp_data))
                 raw_udp_socket.sendto(lst_udp_packet_snmp[0], (destination_ip, port))
@@ -560,7 +585,7 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
 
     return port_n_state
 
-def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, scan_display, source_ip, isTargeted):
+def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, scan_display, source_ip=0, isTargeted=False):
     '''
     acts as both a router and activation of a specific scan function
     '''
@@ -806,7 +831,7 @@ def process_snmp_reply(received_packet, sent_OIDs):
         values.append(item[1]) 
         left_tlv = item[2]
 
-        if item[0] == 0x30 or item[0] == 0xA2: 
+        if item[0] == 0x30 or item[0] == 0xA2:  
             containers.append(item[1])
 
         if left_tlv == b'' and containers:
@@ -893,7 +918,7 @@ def xml_parser(xml_data, xml_type):
 
     return results
 
-def network_scan(source_ip): 
+def ssdp_scan(source_ip): 
 
     port = 1900
     destination_ip = "239.255.255.250" 
@@ -950,7 +975,11 @@ def network_scan(source_ip):
         except Exception:
             continue
 
-        results.append(xml_parser(xml_data, "ssdp"))
+        xml_data = xml_parser(xml_data, "ssdp") 
+        if xml_data in results: #if that device's response was already accounted for, it will not be added again
+            continue
+        else:
+            results.append(xml_data)
 
     if not results: 
         print("No devices found on the network")
@@ -963,59 +992,168 @@ def network_scan(source_ip):
                 print(f"Model Name: {results[i][3]} |")
                 print("\n")
 
+def create_arp_packet(mac_address, source_ip, target_ip):
+
+    '''
+    creates an ARP packet from scratch encapsulating it in an Ethernet frame
+    '''
+
+    eth_header = struct.pack("!6s6sH", b'\xff\xff\xff\xff\xff\xff', mac_address, 0x0806) #broadcast + mac address + ARP type
+    arp_header = struct.pack("!HHBBH6s4s6s4s", 1, 0x0800, 6, 4, 1, mac_address, socket.inet_aton(source_ip), bytes(6), socket.inet_aton(target_ip)) #ARP header
+
+    return eth_header + arp_header
+
+def arp_packet_sending(network, host, source_ip, data_link_socket):
+
+    mac_address = data_link_socket.getsockname()[4]
+
+    complete_ip_address = network + str(host)
+
+    arp_packet = create_arp_packet(mac_address, source_ip, target_ip=complete_ip_address)
+    data_link_socket.send(arp_packet)
+
+def mac_dictionary_loader(): 
+
+    mac_dict = {}
+
+    with open("./mac-vendors-export.csv", newline="") as f:
+        reader = csv.reader(f)
+        next(reader)          
+
+        for line in reader:
+            vendor_mac_code = line[0].replace(":", "")
+            mac_dict[vendor_mac_code] = line[1]
+
+    return mac_dict
+
+def compare_mac_addresses(mac_address, dictionary): #https://maclookup.app/
+
+    return dictionary.get(mac_address[0:3].hex().upper(), "Unknown Vendor")
+
+def arp_scan(source_ip, mac_vendor_dictionary):
+
+    network_ip_arr = source_ip.split('.')
+    network_ip = network_ip_arr[0] + '.' + network_ip_arr[1] + '.' + network_ip_arr[2] + '.'
+    host = range(1, 255)
+
+    try: 
+        data_link_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+        data_link_socket.settimeout(5)
+        data_link_socket.bind(("eth0", 0))    # vincula o socket à interface eth0
+        
+        for host in range(1, 255):
+            arp_packet_sending(network_ip, host, source_ip, data_link_socket)
+
+        data_found = []
+
+        while True:
+        
+            try: 
+
+                received_data = data_link_socket.recv(65535)
+                if received_data[12:14] == b'\x08\x06' and received_data[20:22] == b'\x00\x02':  #checking if the packet is  ARP and a reply
+                    data_found.append([received_data[6:12], received_data[28:32]])    # mac address and IP address from the host that replied
+                else:
+                    continue
+
+            except socket.timeout:  
+                break
+
+    finally: 
+        data_link_socket.close()
+
+    print(f"{'MAC Address':<20}{'IP Address':<18}{'Vendor'}")
+
+    found_ips = []
+
+    for data in data_found:
+
+        if data is None:
+            continue
+
+        found_mac_address = data[0]
+        found_ip_address = socket.inet_ntoa(data[1]) 
+
+        if found_ip_address in found_ips: #ignore in case there are multiple replies from the same host
+            continue
+        found_ips.append(found_ip_address)
+
+        octets = []
+
+        for byte in found_mac_address:
+            octets.append(f"{byte:02X}")      
+        mac_target_str = ":".join(octets)   
+
+        mac_vendor = compare_mac_addresses(found_mac_address, mac_vendor_dictionary)
+        print(f"{mac_target_str:<20}{found_ip_address:<18}{mac_vendor}")
+
+
 def devicescanning():
 
     print("Type only the number indicated by the alternative")
-    scan_type = int(input("Choose the corresponding value to your interest\n1. TCP-SCAN\n2. SYN-SCAN\n3. UDP-SCAN\n4. OS-FINGERPRINT\n5. Network Scanning\n "))
-    destination_ip = input("Target's IP Address: ")
-    source_ip = get_source_ip(destination_ip)
+    scan_type = int(input("Choose the corresponding value to your interest\n1. TCP-SCAN\n2. SYN-SCAN\n3. UDP-SCAN\n4. OS-FINGERPRINT\n5. Network Scanning\n"))
+    source_ip = get_source_ip() 
 
-    if scan_type == 4:
+    if scan_type == 5: 
+        net_scan_type = int(input("Choose the corresponding value to your interest\n1. SSDP Scan\n2. ARP Scan\n3. Both methods\n"))
 
-        os_finterprinting(destination_ip, source_ip)
-
-    elif scan_type == 5: 
-
-        network_scan(source_ip)
+        if net_scan_type == 1:
+            ssdp_scan(source_ip)
+        elif net_scan_type == 2:
+            arp_scan(source_ip, mac_dictionary_loader())
+        else:
+            ssdp_scan(source_ip)
+            print("\n")
+            arp_scan(source_ip, mac_dictionary_loader())
 
     else: 
-        
-        scan_quietness = int(input("How fast do you want the scan to be (scale 1-4, 4 being fast and 1 slower)?\n1. Slow\n2. Normal \n3. Fast \n4. Ultra Fast\n"))
 
-        # timeout / number of workers
-        if scan_quietness == 1:  
-            quietness = [4,50]
-        elif scan_quietness == 2:
-            quietness = [3,100]
-        elif scan_quietness == 3:
-            quietness = [1.5,250]
-        elif scan_quietness == 4:
-            quietness = [0.75,350]
+        destination_ip = input("Target's IP Address: ")
 
-        scan_display = int(input("Display results\n1. Only opened ports \n2. Opened and closed ports\n"))
-        
+        if scan_type == 4:
 
-        if scan_type == 3:
-            scan_specificity = int(input("Target Specific UDP ports or all 1024\n1. Specific Common UDP Ports  \n2. 1-1024 ports\n"))
+            os_finterprinting(destination_ip, source_ip)
 
-            isTargeted = True if scan_specificity == 1 else False
-            ports_to_be_scanned = [53, 67, 69, 111, 123, 137, 161, 1900] if isTargeted == True else range(1,1025)
-
-            port_scan(type_of_scan = "udp", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, isTargeted=isTargeted, source_ip=source_ip)
-
-        else:
-            scan_pattern = int(input("Choose the corresponding value to your interest\n1. Scan on well known ports (1-1024)\n2. Complete Scan (0-65535)\n"))
+        else: 
             
-            if scan_pattern == 1: 
-                ports_to_be_scanned = range(1,1025)
-            elif scan_pattern == 2: 
-                ports_to_be_scanned = range(1,65536)
+            scan_quietness = int(input("How fast do you want the scan to be (scale 1-4, 4 being fast and 1 slower)?\n1. Slow\n2. Normal \n3. Fast \n4. Ultra Fast\n"))
 
-            if scan_type == 1: 
-                port_scan(type_of_scan = "tcp", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display)
-            elif scan_type == 2:
+            # timeout / number of workers
+            if scan_quietness == 1:  
+                quietness = [4,50]
+            elif scan_quietness == 2:
+                quietness = [3,100]
+            elif scan_quietness == 3:
+                quietness = [1.5,250]
+            elif scan_quietness == 4:
+                quietness = [0.75,350]
+
+            scan_display = int(input("Display results\n1. Only opened ports \n2. Opened and closed ports\n"))
+            
+
+            if scan_type == 3:
+                scan_specificity = int(input("Target Specific UDP ports or all 1024\n1. Specific Common UDP Ports  \n2. 1-1024 ports\n"))
+
+                isTargeted = True if scan_specificity == 1 else False
+                ports_to_be_scanned = [53, 67, 69, 111, 123, 137, 161, 1900] if isTargeted == True else range(1,1025)
+
+                port_scan(type_of_scan = "udp", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, isTargeted=isTargeted, source_ip=source_ip)
+
+            else:
+                scan_pattern = int(input("Choose the corresponding value to your interest\n1. Scan on well known ports (1-1024)\n2. Complete Scan (0-65535)\n"))
                 
-                port_scan(type_of_scan = "syn", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, source_ip=source_ip)
+                if scan_pattern == 1: 
+                    ports_to_be_scanned = range(1,1025)
+                elif scan_pattern == 2: 
+                    ports_to_be_scanned = range(1,65536)
 
-    
-devicescanning() 
+                if scan_type == 1: 
+                    port_scan(type_of_scan = "tcp", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display)
+                elif scan_type == 2:
+                    
+                    port_scan(type_of_scan = "syn", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, source_ip=source_ip)
+
+   
+if __name__ == "__main__":
+    devicescanning()
+
