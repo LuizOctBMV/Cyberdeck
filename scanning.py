@@ -585,7 +585,7 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
 
     return port_n_state
 
-def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, scan_display, source_ip=0, isTargeted=False):
+def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, showClosed, source_ip = 0, isTargeted=False):
     '''
     acts as both a router and activation of a specific scan function
     '''
@@ -594,8 +594,6 @@ def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, scan
     syn_partial = partial(syn_scan, destination_ip=destination_ip, source_ip=source_ip, quietness=quietness) 
     tcp_partial = partial(tcp_scan, destination_ip=destination_ip, quietness=quietness)
     udp_partial = partial(udp_scan, destination_ip=destination_ip, source_ip=source_ip, quietness=quietness, isTargeted=isTargeted)
-
-    
 
     if type_of_scan == "syn":
         desired_function = syn_partial
@@ -607,56 +605,53 @@ def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, scan
     with ThreadPoolExecutor(max_workers=quietness[1]) as executor:
             results = executor.map(desired_function, ports_to_be_scanned)
 
-    printing_results(type_of_scan, results, scan_display, isTargeted)
+    printing_results(type_of_scan, results, isTargeted, showClosed)
  
 
-def printing_results(type_of_scan, results, scan_display, isTargeted=False): 
+def printing_results(type_of_scan, results, isTargeted=False, showClosed=False): 
 
-    print("port     state")
+    print(f"{'port':<8}      {'state'}")
     
-    amountClosed = 0
     amountTimedOut = 0
-    amountFiltered = 0
+    amountClosed = 0
 
     for result in results: 
         
         port_n = result[0]
         port_state = result[1]
 
-        if type_of_scan == "tcp":   
+        if type_of_scan == "tcp" or type_of_scan == "syn":   
             
             if port_state == "Open": 
-                print(f"{port_n}  open")
+                print(f"{port_n}|{type_of_scan}  open")
             elif port_state == "TimedOut": 
                 amountTimedOut += 1
             else:
-                if scan_display == 1: 
-                    amountClosed += 1
+                if showClosed:
+                    print(f"{port_n}|{type_of_scan}  closed")
                 else: 
-                    print(f"{port_n}  closed")
+                    amountClosed += 1
 
         elif type_of_scan == "udp": 
         
-
             if port_state == "Open": 
-                print(f"{port_n}  open")
+                print(f"{port_n}|{type_of_scan}  open")
             elif port_state == "Open | Filtered":
-                print(f"{port_n}  Open | Filtered")
+                print(f"{port_n}|{type_of_scan}  Open | Filtered")
             elif port_state == "Filtered":
-                if isTargeted and scan_display != 1:
-                    print(f"{port_n}  filtered")
-                amountFiltered += 1
+                if isTargeted:
+                    print(f"{port_n}|{type_of_scan}  filtered")
+                amountTimedOut += 1
             else:
-                if scan_display == 1: 
-                    amountClosed += 1
+                if showClosed:
+                    print(f"{port_n}|{type_of_scan}  closed")
                 else: 
-                    print(f"{port_n}  closed")
-            
-            
-    if scan_display == 1:
-        print(f"{amountClosed} ports closed and {amountTimedOut} ports filtered")
-    elif scan_display != 1 and not isTargeted: 
-        print(f"{amountTimedOut} ports filtered")
+                    amountClosed += 1
+
+    if showClosed:    
+        print(f"\n{amountClosed} ports closed and {amountTimedOut} ports filtered")
+    else: 
+        print(f"\n{amountTimedOut} ports filtered")
 
 def os_syn_scan(destination_ip, source_ip): 
 
@@ -981,16 +976,22 @@ def ssdp_scan(source_ip):
         else:
             results.append(xml_data)
 
+    print()
     if not results: 
         print("No devices found on the network")
     else: 
+        print("SSDP Results: \n")
         for i in range(len(results)):
-
-                print(f"| Device: {results[i][1]}")
-                print(f"Device Type: {results[i][0]} |")
-                print(f"Manufacturer: {results[i][2]} |")
-                print(f"Model Name: {results[i][3]} |")
-                print("\n")
+            lines = [
+                f"Device: {results[i][1]}",
+                f"Device Type: {results[i][0]}",
+                f"Manufacturer: {results[i][2]}",
+                f"Model Name: {results[i][3]}",
+            ]
+            width = max(len(line) for line in lines)
+            for line in lines:
+                print(f"| {line:<{width}} |")
+            print()
 
 def create_arp_packet(mac_address, source_ip, target_ip):
 
@@ -1062,98 +1063,105 @@ def arp_scan(source_ip, mac_vendor_dictionary):
     finally: 
         data_link_socket.close()
 
-    print(f"{'MAC Address':<20}{'IP Address':<18}{'Vendor'}")
+    if data_found != []: 
+        print("ARP Results: \n")
+        print(f"{'MAC Address':<20}{'IP Address':<18}{'Vendor'}")
 
-    found_ips = []
+        found_ips = []
 
-    for data in data_found:
+        for data in data_found:
 
-        if data is None:
-            continue
+            if data is None:
+                continue
 
-        found_mac_address = data[0]
-        found_ip_address = socket.inet_ntoa(data[1]) 
+            found_mac_address = data[0]
+            found_ip_address = socket.inet_ntoa(data[1]) 
 
-        if found_ip_address in found_ips: #ignore in case there are multiple replies from the same host
-            continue
-        found_ips.append(found_ip_address)
+            if found_ip_address in found_ips: #ignore in case there are multiple replies from the same host
+                continue
+            found_ips.append(found_ip_address)
 
-        octets = []
+            octets = []
 
-        for byte in found_mac_address:
-            octets.append(f"{byte:02X}")      
-        mac_target_str = ":".join(octets)   
+            for byte in found_mac_address:
+                octets.append(f"{byte:02X}")      
+            mac_target_str = ":".join(octets)   
 
-        mac_vendor = compare_mac_addresses(found_mac_address, mac_vendor_dictionary)
-        print(f"{mac_target_str:<20}{found_ip_address:<18}{mac_vendor}")
-
-
-def devicescanning():
-
-    print("Type only the number indicated by the alternative")
-    scan_type = int(input("Choose the corresponding value to your interest\n1. TCP-SCAN\n2. SYN-SCAN\n3. UDP-SCAN\n4. OS-FINGERPRINT\n5. Network Scanning\n"))
-    source_ip = get_source_ip() 
-
-    if scan_type == 5: 
-        net_scan_type = int(input("Choose the corresponding value to your interest\n1. SSDP Scan\n2. ARP Scan\n3. Both methods\n"))
-
-        if net_scan_type == 1:
-            ssdp_scan(source_ip)
-        elif net_scan_type == 2:
-            arp_scan(source_ip, mac_dictionary_loader())
-        else:
-            ssdp_scan(source_ip)
-            print("\n")
-            arp_scan(source_ip, mac_dictionary_loader())
-
+            mac_vendor = compare_mac_addresses(found_mac_address, mac_vendor_dictionary)
+            print(f"{mac_target_str:<20}{found_ip_address:<18}{mac_vendor}")
     else: 
+        print("No device was found through ARP scan")
+
+def scanmenu(): 
+
+    print("For the following questions: type only the number indicated by the alternative.\n")
+
+    scan_number = int(input("Choose the corresponding value to your interest\n1. TCP-SCAN\n2. SYN-SCAN\n3. UDP-SCAN\n4. OS-FINGERPRINT\n5. Network Scanning\n"))
+
+    scan_dictionary = {1:"tcp", 2:"syn", 3:"udp", 4:"os", 5:"net"}
+
+    try: 
+        scan_type = scan_dictionary[scan_number] 
+    except: 
+        raise ValueError("Invalid Scan Number")
+    
+    destination_ip = 0 #since net scan does not need an ip address or values below
+    scan_quietness = 0
+    udp_specificity = False
+    targeted_ports = 0
+    showClosed = 0
+
+    if scan_type != "net": 
 
         destination_ip = input("Target's IP Address: ")
 
-        if scan_type == 4:
+        if scan_type != "os": 
 
-            os_finterprinting(destination_ip, source_ip)
-
-        else: 
-            
             scan_quietness = int(input("How fast do you want the scan to be (scale 1-4, 4 being fast and 1 slower)?\n1. Slow\n2. Normal \n3. Fast \n4. Ultra Fast\n"))
+            showClosed = bool(input("Show closed ports (can pollute the output)?\n0. No\n1. Yes \n"))
+                              
+            if scan_type == "udp": 
 
-            # timeout / number of workers
-            if scan_quietness == 1:  
-                quietness = [4,50]
-            elif scan_quietness == 2:
-                quietness = [3,100]
-            elif scan_quietness == 3:
-                quietness = [1.5,250]
-            elif scan_quietness == 4:
-                quietness = [0.75,350]
+                udp_specificity = int(input("Which ports to target? \n1. Specific Common UDP Ports  \n2. 1-1024 ports (less reliable)\n"))
 
-            scan_display = int(input("Display results\n1. Only opened ports \n2. Opened and closed ports\n"))
-            
+            else: 
 
-            if scan_type == 3:
-                scan_specificity = int(input("Target Specific UDP ports or all 1024\n1. Specific Common UDP Ports  \n2. 1-1024 ports\n"))
+                targeted_ports = int(input("Which ports to target? \n1. Scan on well known ports (1-1024)\n2. Complete Scan (0-65535)\n")) 
 
-                isTargeted = True if scan_specificity == 1 else False
-                ports_to_be_scanned = [53, 67, 69, 111, 123, 137, 161, 1900] if isTargeted == True else range(1,1025)
 
-                port_scan(type_of_scan = "udp", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, isTargeted=isTargeted, source_ip=source_ip)
+    parsing_scanoptions(scan_type, destination_ip, scan_quietness, udp_specificity, targeted_ports, showClosed)
+    
+def parsing_scanoptions(scan_type, destination_ip=0, scan_quietness=0, udp_specificity = False, targeted_ports = 0, showClosed=False): 
 
-            else:
-                scan_pattern = int(input("Choose the corresponding value to your interest\n1. Scan on well known ports (1-1024)\n2. Complete Scan (0-65535)\n"))
-                
-                if scan_pattern == 1: 
-                    ports_to_be_scanned = range(1,1025)
-                elif scan_pattern == 2: 
-                    ports_to_be_scanned = range(1,65536)
+    
+    source_ip = get_source_ip() 
 
-                if scan_type == 1: 
-                    port_scan(type_of_scan = "tcp", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display)
-                elif scan_type == 2:
-                    
-                    port_scan(type_of_scan = "syn", ports_to_be_scanned=ports_to_be_scanned, destination_ip=destination_ip, quietness=quietness, scan_display=scan_display, source_ip=source_ip)
+    if scan_type == "os": 
 
-   
-if __name__ == "__main__":
-    devicescanning()
+        os_finterprinting(destination_ip, source_ip)
 
+    elif scan_type == "net": 
+
+        ssdp_scan(source_ip)
+        print()
+        arp_scan(source_ip, mac_dictionary_loader())
+
+    else: 
+
+        quietness_dictionary = {1:[4,50], 2:[3,100], 3:[1.5,250], 4:[0.75,350]}
+        quietness_vl = quietness_dictionary[scan_quietness]
+
+        if udp_specificity: 
+            port_range = [53, 67, 69, 111, 123, 137, 161, 1900]
+
+        else:
+            ports_dictionary = {1: range(1,1025), 2: range(1,65536), 1024: range(1,1025), 65535: range(1,65536)} 
+            port_range = ports_dictionary[targeted_ports]
+
+        port_scan(type_of_scan = scan_type , ports_to_be_scanned=port_range, destination_ip=destination_ip, quietness=quietness_vl, source_ip=source_ip, isTargeted= udp_specificity, showClosed=showClosed)
+  
+
+
+    
+
+    
