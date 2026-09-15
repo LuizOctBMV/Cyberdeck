@@ -7,6 +7,7 @@ import select
 import xml.etree.ElementTree as ET
 import urllib.request
 import csv
+import time 
 
 def create_TCP_header( #takes only int values
         source_port,
@@ -171,15 +172,13 @@ def packet_validation(received_packet,destination_ip=0, source_port=0, destinati
     if isUDP:
         if (not containsICMP): 
             udp_recv = ip_header_remover(received_packet)
-                
+   
         elif containsICMP: 
             icmp_recv = ip_header_remover(received_packet)      
             udp_recv = ip_header_remover(icmp_recv[8:])         # removes everything except the original UDP header
 
 
         sender_src_ip = socket.inet_ntoa(received_packet[12:16])            # getting the source ip from the received ip header
-        sender_src_port = struct.unpack("!H", udp_recv[0:2])[0]             # getting the source port from the received udp header
-        sender_destination_port = struct.unpack("!H", udp_recv[2:4])[0]     # getting the destination port from the received udp header
                            
     if isTCP: 
 
@@ -220,7 +219,7 @@ def create_SYN_packet(port, destination_ip, source_ip):
 
     return [final_packet,src_port]
 
-def syn_scan(port, destination_ip, source_ip, quietness): 
+def syn_scan(port, destination_ip, source_ip, quietness, desynch_ports_dic): 
 
     '''
     this method creates a SYN packet from scratch and sends it to the specified destination_ip and port;
@@ -237,9 +236,15 @@ def syn_scan(port, destination_ip, source_ip, quietness):
     
 
     try: 
+        max_time = time.time() + quietness[0]
         raw_tcp_socket.sendto(lst_syn_packet[0], (destination_ip, port))
+
         while True:
             try: 
+
+                if time.time() >= max_time:
+                    port_n_state[1] = "TimedOut"
+                    return port_n_state
                 
                 received_data = raw_tcp_socket.recv(65535)
                 tcp_recv = ip_header_remover(received_data)
@@ -247,6 +252,10 @@ def syn_scan(port, destination_ip, source_ip, quietness):
                 isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=lst_syn_packet[1], destination_port=port, received_packet=received_data, isTCP=True)
                 if isExpectedPacket:
                     break
+                elif destination_ip == socket.inet_ntoa(received_data[12:16]):
+                    desynch_ports_dic[struct.unpack("!H", tcp_recv[0:2])[0]] = evaluate_flags(protocol="tcp", flag=tcp_recv[13])
+                else:
+                    continue
 
             except socket.timeout:
                 port_n_state[1] = "TimedOut"
@@ -356,7 +365,7 @@ def create_UDP_packet(port, destination_ip, source_ip, length, data=b''):
 
     return [udp_packet, src_port]
 
-def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False, osFingerprinting = False): 
+def udp_scan(port, destination_ip, source_ip, desynch_ports_dic=0, quietness=[5,], isTargeted = False, osFingerprinting = False): 
 
     '''
     creates a UDP packet from scratch and sends to the specified destination_ip
@@ -368,7 +377,9 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
     port_n_state = [port, "n/a"]
 
     if isTargeted:
-        
+
+        udp_data = b''
+
         if port == 53: #DNS
             id = random.randint(0,65534)
             dns_header = struct.pack("!HHHHHH", 
@@ -387,6 +398,7 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
                 0,          #0
                 1,          #QTYPE(A=1)
                 1)          #QCLASS(IN=1
+            
             udp_data = dns_header + dns_message
 
         elif port == 67: #DHCP
@@ -544,56 +556,106 @@ def udp_scan(port, destination_ip, source_ip, quietness=[5,], isTargeted = False
     else: 
         lst_udp_packet = create_UDP_packet(port, destination_ip, source_ip, length = 8)
 
+
     raw_udp_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_UDP)     #socket to send and receive UDP packets
     raw_icmp_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)       #socket to receive  ICMP packets
 
     try:
         raw_udp_socket.sendto(lst_udp_packet[0], (destination_ip, port))
 
+        max_time = time.time() + 5 
+
+        icmp_recv_arr = []
         while True:
+
+            #since the desired ICMP type 3 can never arrive, it is necessary to have a timeout that does not reset everytime (select timeout does)
+
+            time_left = max_time - time.time() 
+            if time_left <= 0: 
+                port_n_state[1] = "Open | Filtered"
+                break
 
             returned, _, _ = select.select([raw_udp_socket, raw_icmp_socket], [], [], quietness[0])
 
             if raw_udp_socket in returned:
+
                 received_data = raw_udp_socket.recv(65535)
-                isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=lst_udp_packet[1], received_packet=received_data, isUDP = True)
+                isExpectedPacket = packet_validation(destination_ip=destination_ip, received_packet=received_data, isUDP = True)
 
                 if isExpectedPacket:
-                    port_n_state[1] = "Open"
-                    break
+                    udp_recv = ip_header_remover(received_data)
+                    sender_source_port = struct.unpack("!H", udp_recv[0:2])[0]
+                    if port == sender_source_port: 
+                        port_n_state[1] = "Open"
+                        break
+                    else:
+                        desynch_ports_dic[sender_source_port] = "Open"
+                        continue
+                else: 
+                    continue
                     
 
             elif raw_icmp_socket in returned: 
                 
-                received_data = raw_icmp_socket.recv(65535)     #received data: Sender IP HEADER + ICMP HEADER + OUR IP HEADER + OUR UDP HEADER
+                received_data = raw_icmp_socket.recv(65535)     #received data: Sender IP HEADER + ICMP HEADER +  Original(IP HEADER + OR UDP HEADER)
                 icmp_recv = ip_header_remover(received_data)    
 
-                if icmp_recv[0] == 0x03:            #checking if the icmp type is destination unreacheable (type 3), which is the desired type for this case
-                    port_n_state[1] = evaluate_flags(protocol="icmp", flag=icmp_recv[1])
+                isExpectedPacket = packet_validation(destination_ip=destination_ip, received_packet=received_data, isUDP = True, containsICMP= True)
+
+                if isExpectedPacket:
+                    if icmp_recv[0] == 0x03:            #checking if the icmp type is destination unreacheable (type 3), which is the desired type for this case
+
+                        udp_recv = ip_header_remover(icmp_recv[8:])
+                        destination_port = struct.unpack("!H", udp_recv[2:4])[0]
+                        if port == destination_port: 
+                            port_n_state[1] = "Closed"
+                            break
+                        else: 
+                            desynch_ports_dic[destination_port] = "Closed"
+                            continue
+                    else:
+                        continue
                 else: 
                     continue
-
-                isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=lst_udp_packet[1], received_packet=received_data, isUDP = True, containsICMP= True)
-                if isExpectedPacket: 
-                    break
                 
             else:
                 port_n_state[1] = "Open | Filtered"
+                break
+
     finally: 
         raw_udp_socket.close()
         raw_icmp_socket.close()
 
     return port_n_state
 
+def closed_ports_inserter(results, desynch_ports_dic): 
+
+    '''
+    this method rearrage the results from a Port Scan, where it replaces ports that were wrongly given a Open Filtered state
+    to a closed one, due to the desynchronzation with the workers and sockets
+
+    '''
+
+    for port, state in desynch_ports_dic.items():
+        for result in results: 
+            if result[0] == port: 
+                result[1] = state
+
+            else:
+                continue
+
+    return results
+
 def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, showClosed, source_ip = 0, isTargeted=False):
     '''
     acts as both a router and activation of a specific scan function
     '''
+    desynch_ports_dict = {} 
 
     # partial functions allows the IP address and other parameters to be included on the threading process  
-    syn_partial = partial(syn_scan, destination_ip=destination_ip, source_ip=source_ip, quietness=quietness) 
+    syn_partial = partial(syn_scan, destination_ip=destination_ip, source_ip=source_ip, quietness=quietness, desynch_ports_dic = desynch_ports_dict) 
     tcp_partial = partial(tcp_scan, destination_ip=destination_ip, quietness=quietness)
-    udp_partial = partial(udp_scan, destination_ip=destination_ip, source_ip=source_ip, quietness=quietness, isTargeted=isTargeted)
+    udp_partial = partial(udp_scan, destination_ip=destination_ip, source_ip=source_ip, quietness=quietness, isTargeted=isTargeted, desynch_ports_dic = desynch_ports_dict)
 
     if type_of_scan == "syn":
         desired_function = syn_partial
@@ -603,8 +665,11 @@ def port_scan(type_of_scan, ports_to_be_scanned, destination_ip, quietness, show
         desired_function = udp_partial
 
     with ThreadPoolExecutor(max_workers=quietness[1]) as executor:
-            results = executor.map(desired_function, ports_to_be_scanned)
+        results = list(executor.map(desired_function, ports_to_be_scanned))
 
+
+    results = closed_ports_inserter(results, desynch_ports_dict)
+        
     printing_results(type_of_scan, results, isTargeted, showClosed)
  
 
@@ -623,12 +688,12 @@ def printing_results(type_of_scan, results, isTargeted=False, showClosed=False):
         if type_of_scan == "tcp" or type_of_scan == "syn":   
             
             if port_state == "Open": 
-                print(f"{port_n}|{type_of_scan}  open")
+                print(f"{port_n}|tcp  open")
             elif port_state == "TimedOut": 
                 amountTimedOut += 1
             else:
                 if showClosed:
-                    print(f"{port_n}|{type_of_scan}  closed")
+                    print(f"{port_n}|tcp  closed")
                 else: 
                     amountClosed += 1
 
@@ -649,14 +714,14 @@ def printing_results(type_of_scan, results, isTargeted=False, showClosed=False):
                     amountClosed += 1
 
     if showClosed:    
-        print(f"\n{amountClosed} ports closed and {amountTimedOut} ports filtered")
-    else: 
         print(f"\n{amountTimedOut} ports filtered")
+    else: 
+        print(f"\n{amountClosed} ports closed and {amountTimedOut} ports filtered")
 
 def os_syn_scan(destination_ip, source_ip): 
 
     raw_tcp_socket_os = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-    raw_tcp_socket_os.settimeout(5)
+    raw_tcp_socket_os.settimeout(2)
     portNotFiltered = False         # if an open or closed port was found
 
     for port in range(1,65536): 
@@ -675,11 +740,13 @@ def os_syn_scan(destination_ip, source_ip):
 
                 isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=syn_packet[1], destination_port=port, received_packet=received_data, isTCP=True)
                 if isExpectedPacket:
+                    if tcp_recv[13] & 0x04:  
+                        break
                     portNotFiltered = True
                     break
 
             except socket.timeout:
-                continue
+                break
 
     raw_tcp_socket_os.close()    
 
@@ -699,12 +766,15 @@ def os_syn_scan(destination_ip, source_ip):
         window_size = struct.unpack("!H", tcp_recv[14:16])[0]
 
         #TCP Options info
-        containsOptions = True if (tcp_recv[12] >> 4) > 5 else False    #if the value of the DataOffset is more than 5, there are options
+        data_offset = (tcp_recv[12] >> 4)
+        containsOptions = True if data_offset > 5 else False    #if the value of the DataOffset is more than 5, there are options
 
         options_order = [] 
         windowScale_value = 0
 
         if containsOptions:
+            tcp_header_size = data_offset * 4
+
             # option format is [kind][length][value]
 
             # containsNOP = False
@@ -712,9 +782,8 @@ def os_syn_scan(destination_ip, source_ip):
             # containsMSS = False
             containsWindScale = False
             
-
             kindIndex = 20
-            while tcp_recv[kindIndex] != 0: #check if kind is of type 0 (END)
+            while kindIndex < tcp_header_size and tcp_recv[kindIndex] != 0: #check if kind is of type 0 (END)
                 
                 kind = tcp_recv[kindIndex]
 
@@ -725,7 +794,7 @@ def os_syn_scan(destination_ip, source_ip):
                     kindIndex += 1  # NOP does not contain length or a value, therefore it is necessary to skip to the next byte
                     continue 
 
-                optionLength = struct.unpack("!B", tcp_recv[kindIndex + 1])[0] 
+                optionLength = tcp_recv[kindIndex + 1]
          
                 if kind != 4: #sackOK does not contain a value, only kind and length
                     if kind == 2:   #MSS has 2 bytes of value
@@ -765,14 +834,14 @@ def os_fingerprint_evaluator(timeToLive, windowSize, windowScaleValue, optionsOr
     denominator = 2
 
     if timeToLive <= 64: 
-        linuxMachine += 1
+        linuxMachine += 2
     elif timeToLive <= 128:
-        windowsMachine += 1
+        windowsMachine += 2
 
     if windowSize == 29200 or windowSize == 64240:
-        linuxMachine += 1
+        linuxMachine += 2
     elif windowSize == 65535 or windowSize == 8192: 
-        windowsMachine += 1
+        windowsMachine += 2
 
     if containsOptions: 
 
@@ -793,19 +862,19 @@ def os_fingerprint_evaluator(timeToLive, windowSize, windowScaleValue, optionsOr
 
     if linuxMachine > windowsMachine: 
         chance = linuxMachine/denominator
-        operational_system = "Linux"
+        operational_system = "\nLinux"
 
     elif windowsMachine > linuxMachine: 
         chance = windowsMachine/denominator
-        operational_system = "Windows"
+        operational_system = "\nWindows"
 
-    if chance >= 0.75: 
+    if chance >= 0.5: 
         return operational_system
     else: 
-        return "Indeterminate"
+        return "\nIndeterminate"
 
 
-def process_snmp_reply(received_packet, sent_OIDs): 
+def process_snmp_reply(received_packet): 
 
     results = []
     containers = []
@@ -873,16 +942,17 @@ def process_snmp_reply(received_packet, sent_OIDs):
 def os_finterprinting(destination_ip, source_ip ): 
 
     syn_scan_evaluation = os_syn_scan(destination_ip, source_ip) 
-    snmp_request_evaluation = udp_scan(destination_ip, source_ip, osFingerprinting=True)
+    snmp_request_evaluation = udp_scan(port=161, destination_ip=destination_ip, source_ip=source_ip, osFingerprinting=True)
 
     print("\nSYN Scan OS Finding:" + syn_scan_evaluation)
     print("\nSNMP OS Finding: ")
-    if snmp_request_evaluation == "Indeterminate": 
-        print("Indeterminate")
-    else: 
-        print("\n System Description: " + snmp_request_evaluation[0])
-        print("\n System Object: " + snmp_request_evaluation[1])
 
+    if isinstance(snmp_request_evaluation[0], str) and snmp_request_evaluation != "Indeterminate":
+        print("System Description: " + snmp_request_evaluation[0])
+        print("System Object: " + snmp_request_evaluation[1])
+    else:
+        print("SNMP Indeterminate")
+        
 def xml_parser(xml_data, xml_type):
         
     results = []
@@ -1017,7 +1087,7 @@ def mac_dictionary_loader():
 
     mac_dict = {}
 
-    with open("./mac-vendors-export.csv", newline="") as f:
+    with open("./wordlists/mac-vendors-export.csv", newline="") as f:
         reader = csv.reader(f)
         next(reader)          
 
@@ -1118,20 +1188,22 @@ def scanmenu():
         if scan_type != "os": 
 
             scan_quietness = int(input("How fast do you want the scan to be (scale 1-4, 4 being fast and 1 slower)?\n1. Slow\n2. Normal \n3. Fast \n4. Ultra Fast\n"))
-            showClosed = bool(input("Show closed ports (can pollute the output)?\n0. No\n1. Yes \n"))
+            showClosed = input("Show closed ports (can pollute the output)?\n1. Yes\n2. No \n") == "1"
                               
             if scan_type == "udp": 
 
-                udp_specificity = int(input("Which ports to target? \n1. Specific Common UDP Ports  \n2. 1-1024 ports (less reliable)\n"))
+                udp_specificity = int(input("Which ports to target? \n1. Specific Common UDP Ports  \n2. 1-1024 ports (less reliable)\n")) 
+                if udp_specificity == "1": 
+                    isTargeted = True
 
             else: 
 
                 targeted_ports = int(input("Which ports to target? \n1. Scan on well known ports (1-1024)\n2. Complete Scan (0-65535)\n")) 
 
 
-    parsing_scanoptions(scan_type, destination_ip, scan_quietness, udp_specificity, targeted_ports, showClosed)
+    parsing_scanoptions(scan_type, destination_ip, scan_quietness, isTargeted, targeted_ports, showClosed)
     
-def parsing_scanoptions(scan_type, destination_ip=0, scan_quietness=0, udp_specificity = False, targeted_ports = 0, showClosed=False): 
+def parsing_scanoptions(scan_type, destination_ip=0, scan_quietness=0, isTargeted = False, targeted_ports = 0, showClosed=False): 
 
     
     source_ip = get_source_ip() 
@@ -1151,14 +1223,15 @@ def parsing_scanoptions(scan_type, destination_ip=0, scan_quietness=0, udp_speci
         quietness_dictionary = {1:[4,50], 2:[3,100], 3:[1.5,250], 4:[0.75,350]}
         quietness_vl = quietness_dictionary[scan_quietness]
 
-        if udp_specificity: 
-            port_range = [53, 67, 69, 111, 123, 137, 161, 1900]
+        if isTargeted: 
+
+            port_range = [53, 67, 69, 111, 123, 137, 161]
 
         else:
             ports_dictionary = {1: range(1,1025), 2: range(1,65536), 1024: range(1,1025), 65535: range(1,65536)} 
             port_range = ports_dictionary[targeted_ports]
 
-        port_scan(type_of_scan = scan_type , ports_to_be_scanned=port_range, destination_ip=destination_ip, quietness=quietness_vl, source_ip=source_ip, isTargeted= udp_specificity, showClosed=showClosed)
+        port_scan(type_of_scan = scan_type , ports_to_be_scanned=port_range, destination_ip=destination_ip, quietness=quietness_vl, source_ip=source_ip, isTargeted= isTargeted, showClosed=showClosed)
   
 
 
