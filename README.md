@@ -4,7 +4,7 @@
 
 # Cyberdeck
 
-**A cybersecurity toolkit built from scratch in Python with no external libraries**
+**A cybersecurity toolkit built in Python with no external libraries**
 
 ![Python](https://img.shields.io/badge/python-3.x-blue?style=for-the-badge&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Linux-black?style=for-the-badge&logo=linux&logoColor=white)
@@ -27,7 +27,7 @@
 7. [License](#license)
 8. [Contact](#contact)
 8. [Acknowledgements](#acknowledgements)
-
+9. [Why "Cyberdeck"?](#why-cyberdeck)
 ## Disclaimer
 
 This toolkit is intended for **educational purposes and authorized security testing only**. Only use it against networks, devices, and systems that you own or have explicit written permission to test. Unauthorized use may be illegal in your jurisdiction and is entirely your responsibility. 
@@ -232,3 +232,9 @@ These are some of the websites I used that can be used for someone wanting to do
 - [Wikipedia](https://en.wikipedia.org/wiki/TCP/IP_stack_fingerprinting) -> For the information to be analyzed on the OS fingerprinting process
 - **RFCs** -> This is a more general source, but it was used mainly when crafting the specific payloads for the UDP scan
 - [maclookup.app](https://maclookup.app/) -> MAC address vendor database (sourced from the IEEE registry).
+- [README idea](https://github.com/othneildrew/Best-README-Template/tree/main)
+
+## Why "Cyberdeck"? 
+
+This past summer (2026) I played a lot of Cyberpunk 2077, and one of the tools you can have in the game is a cyberdeck, which is a component that carries quickhacks. 
+That's basically the purpose of this application: to carry many tools in a single place.

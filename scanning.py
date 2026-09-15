@@ -722,11 +722,22 @@ def os_syn_scan(destination_ip, source_ip):
 
     raw_tcp_socket_os = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
     raw_tcp_socket_os.settimeout(2)
+
     portNotFiltered = False         # if an open or closed port was found
+
+    SYNACKpacket = False
+    foundRST = False
+    RSTpacket = b''
+    
 
     for port in range(1,65536): 
 
-        if portNotFiltered: #stops as soon as an open or closed port is found
+        if SYNACKpacket: #stops as soon as an openport is found
+            portNotFiltered = True
+            break
+        elif foundRST and port >= 144: #RST is only going to be used if no open port was found before 144
+            portNotFiltered = True
+            tcp_recv = RSTpacket
             break
 
         syn_packet = create_SYN_packet(port, destination_ip, source_ip)
@@ -740,10 +751,14 @@ def os_syn_scan(destination_ip, source_ip):
 
                 isExpectedPacket = packet_validation(destination_ip=destination_ip, source_port=syn_packet[1], destination_port=port, received_packet=received_data, isTCP=True)
                 if isExpectedPacket:
-                    if tcp_recv[13] & 0x04:  
-                        break
-                    portNotFiltered = True
+                    flag_type = evaluate_flags("tcp", tcp_recv[13]) 
+                    if flag_type  == "Open":
+                        SYNACKpacket = True
+                    elif flag_type ==  "Closed": 
+                        foundRST = True
+                        RSTpacket = tcp_recv
                     break
+
 
             except socket.timeout:
                 break
@@ -834,9 +849,9 @@ def os_fingerprint_evaluator(timeToLive, windowSize, windowScaleValue, optionsOr
     denominator = 2
 
     if timeToLive <= 64: 
-        linuxMachine += 2
+        linuxMachine += 1
     elif timeToLive <= 128:
-        windowsMachine += 2
+        windowsMachine += 1
 
     if windowSize == 29200 or windowSize == 64240:
         linuxMachine += 2
@@ -844,6 +859,9 @@ def os_fingerprint_evaluator(timeToLive, windowSize, windowScaleValue, optionsOr
         windowsMachine += 2
 
     if containsOptions: 
+        #TTL and windowsSize should have greater importance on the evaluation process
+        linuxMachine *= 2
+        windowsMachine *= 2 
 
         denominator = 4
 
@@ -868,7 +886,7 @@ def os_fingerprint_evaluator(timeToLive, windowSize, windowScaleValue, optionsOr
         chance = windowsMachine/denominator
         operational_system = "\nWindows"
 
-    if chance >= 0.5: 
+    if chance >= 0.75: 
         return operational_system
     else: 
         return "\nIndeterminate"
